@@ -50,6 +50,14 @@ type PackageOptions struct {
 	Version     string
 	GOOS        string
 	GOARCH      string
+	// WithHelpers stages the local-control browser/terminal helpers (npm ci
+	// against package-lock.json) into helpers/ inside the release archive.
+	// Off by default — most installs only need the CLI binary; helpers add
+	// ~60-70 MB to every tarball and force an npm install step in the
+	// builder. Enable only when downstream consumers need browser/terminal
+	// control out of the box (e.g. the npm platform packages, which vendor
+	// helpers/ rather than re-resolving at runtime).
+	WithHelpers bool
 }
 
 type BuildOptions struct {
@@ -81,6 +89,29 @@ type SmokeResult struct {
 
 type PackageResult struct {
 	PackageName string
+	ArchiveName string
+	ArchivePath string
+	Checksum    WrittenChecksum
+	Version     string
+	GOOS        string
+	GOARCH      string
+}
+
+type CrossPackageOptions struct {
+	RootDir     string
+	ReleaseDir  string
+	StagingRoot string
+	Version     string
+	GOOS        string
+	GOARCH      string
+	// WithHelpers is accepted for symmetry with PackageOptions but cross
+	// builds never stage helpers: npm ci resolves platform-specific
+	// binaries, and a non-host helper tree cannot be smoke-tested. Kept as
+	// a flag so the CLI parser doesn't have to special-case it.
+	WithHelpers bool
+}
+
+type CrossPackageResult struct {
 	ArchiveName string
 	ArchivePath string
 	Checksum    WrittenChecksum
@@ -168,8 +199,60 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 	if err != nil {
 		return PackageResult{}, err
 	}
+	return packageImpl(ctx, rootDir, options, true)
+}
+
+// CrossPackage builds a release archive for a target platform that does not
+// match the host (for example linux/386 or linux/riscv64 produced from
+// ubuntu-latest). It mirrors Package()'s archive layout so install.sh /
+// install.ps1 keep working unchanged, but skips two steps that depend on the
+// host: smokeVersion (running the produced binary, which only makes sense when
+// host==target) and stageLocalControlHelpers (npm ci against package-lock.json,
+// which is host-platform specific and adds minutes to a cross job that does
+// not exercise the helper shims anyway). install.sh treats the helpers/ dir as
+// optional, so a release without it still installs a working CLI; users who
+// need browser/terminal control fall back to the platform's native build
+// (linux/amd64, macos/*, windows/*).
+func CrossPackage(ctx context.Context, options CrossPackageOptions) (CrossPackageResult, error) {
+	rootDir, err := resolveRootDir(options.RootDir)
+	if err != nil {
+		return CrossPackageResult{}, err
+	}
+	pkgOptions := PackageOptions{
+		RootDir:     rootDir,
+		ReleaseDir:  options.ReleaseDir,
+		StagingRoot: options.StagingRoot,
+		Version:     options.Version,
+		GOOS:        options.GOOS,
+		GOARCH:      options.GOARCH,
+		WithHelpers: options.WithHelpers,
+	}
+	result, err := packageImpl(ctx, rootDir, pkgOptions, false)
+	if err != nil {
+		return CrossPackageResult{}, err
+	}
+	return CrossPackageResult{
+		ArchiveName: result.ArchiveName,
+		ArchivePath: result.ArchivePath,
+		Checksum:    result.Checksum,
+		Version:     result.Version,
+		GOOS:        result.GOOS,
+		GOARCH:      result.GOARCH,
+	}, nil
+}
+
+// packageImpl shares the build+stage+archive+checksum pipeline between the
+// host-validated Package path and the cross-compile CrossPackage path. When
+// hostValidated is true the caller must have already confirmed
+// goos/goarch==runtime.GOOS/GOARCH (Package does this up front and fails
+// otherwise); when false, CrossPackage skips the host-only smoke step.
+// options.WithHelpers controls whether stageLocalControlHelpers runs — off
+// by default because helpers/ adds ~60-70 MB to every tarball and most
+// install paths (install.sh, install.ps1) treat it as optional.
+func packageImpl(ctx context.Context, rootDir string, options PackageOptions, hostValidated bool) (PackageResult, error) {
 	version := strings.TrimSpace(options.Version)
 	if version == "" {
+		var err error
 		version, err = PackageVersion(rootDir)
 		if err != nil {
 			return PackageResult{}, err
@@ -183,7 +266,7 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 	if goarch == "" {
 		goarch = runtime.GOARCH
 	}
-	if goos != runtime.GOOS || goarch != runtime.GOARCH {
+	if hostValidated && (goos != runtime.GOOS || goarch != runtime.GOARCH) {
 		return PackageResult{}, fmt.Errorf("release packaging target must match host platform for smoke verification: host %s/%s, target %s/%s", runtime.GOOS, runtime.GOARCH, goos, goarch)
 	}
 	packageName, err := ReleasePackageName(version, goos, goarch)
@@ -237,14 +320,18 @@ func Package(ctx context.Context, options PackageOptions) (PackageResult, error)
 			return PackageResult{}, fmt.Errorf("build %s: %w", name, err)
 		}
 	}
-	if err := smokeVersion(ctx, artifactPath, version); err != nil {
-		return PackageResult{}, err
+	if hostValidated {
+		if err := smokeVersion(ctx, artifactPath, version); err != nil {
+			return PackageResult{}, err
+		}
 	}
 	if err := copyPackageFiles(rootDir, stagingDir, artifactPath, stagedBinaryPath, goos, version, helperArtifacts); err != nil {
 		return PackageResult{}, err
 	}
-	if err := stageLocalControlHelpers(ctx, rootDir, filepath.Join(stagingDir, "helpers")); err != nil {
-		return PackageResult{}, err
+	if options.WithHelpers {
+		if err := stageLocalControlHelpers(ctx, rootDir, filepath.Join(stagingDir, "helpers")); err != nil {
+			return PackageResult{}, err
+		}
 	}
 	if err := createArchive(stagingDir, archivePath, goos); err != nil {
 		return PackageResult{}, err
@@ -326,6 +413,10 @@ func ReleaseArch(goarch string) (string, error) {
 		return "x64", nil
 	case "arm64":
 		return "arm64", nil
+	case "386":
+		return "x86", nil
+	case "riscv64":
+		return "riscv64", nil
 	default:
 		return "", fmt.Errorf("unsupported release architecture: %s", goarch)
 	}

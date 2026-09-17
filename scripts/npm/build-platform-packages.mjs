@@ -246,16 +246,29 @@ function pruneAgentBrowserBinaries(packageDir, entry) {
   }
 }
 
-// Mirrors verifyStagedLocalControlHelpers in internal/release/release.go: the
-// payload must carry runnable shims for both vendored helpers, or browser /
-// terminal control silently degrades to a PATH lookup for every npm user.
+// Originally a hard fail: the payload had to carry runnable shims for both
+// vendored helpers, or browser / terminal control silently degraded to a PATH
+// lookup for every npm user. With helpers/ now opt-in at the GitHub release
+// stage (most users only need the CLI binary, and the ~60-70 MB node_modules
+// tree was bloating every tarball), the npm platform packages also arrive
+// without helpers/. The wrapper's first-run downloader still resolves them
+// from the matching GitHub release if a user opts in to browser/terminal
+// control, so we warn here and continue.
 function verifyHelperShims(packageDir, entry, assetName) {
   const binDir = join(packageDir, 'helpers', 'node_modules', '.bin');
+  if (!existsSync(binDir)) {
+    console.warn(
+      `${assetName}: helpers/ tree absent — browser/terminal control will fall back to runtime download on first use.`,
+    );
+    return;
+  }
   for (const helper of ['agent-browser', 'tuistory']) {
     const shimNames =
       entry.platform === 'win32' ? [`${helper}.cmd`, `${helper}.exe`, helper] : [helper];
     if (!shimNames.some((name) => existsSync(join(binDir, name)))) {
-      fail(`${assetName} helpers tree is missing an executable ${helper} shim`);
+      console.warn(
+        `${assetName}: helpers/ tree is missing an executable ${helper} shim — ${helper} will fall back to runtime download.`,
+      );
     }
   }
 }

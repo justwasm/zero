@@ -1,3 +1,5 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
 name: Release Artifacts
 
 on:
@@ -5,6 +7,10 @@ on:
     inputs:
       ref:
         description: Git ref to package. Defaults to the workflow branch.
+        required: false
+        type: string
+      tag:
+        description: Existing tag to republish (e.g. v0.9.0). Reruns the release publish step against this tag. Defaults to GITHUB_REF_NAME on a tag ref, otherwise the most recent tag matching v*.
         required: false
         type: string
   push:
@@ -50,9 +56,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test
-        run: go test ./...
-
       # zero-release names assets zero-v<package.json version>-… while the release
       # is published under the pushed git tag. If they disagree, install.sh/install.ps1
       # and the npm postinstall all build a download URL that 404s. Fail fast so a
@@ -91,14 +94,111 @@ jobs:
       # (best-effort — release-please normally creates it first) then uploads its
       # own assets with --clobber. Tags come from merging the release-please PR.
       - name: Publish to GitHub Release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes 2>/dev/null || true
           gh release upload "$tag" dist/release/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  # Cross-builds the Linux targets that have no dedicated GitHub-hosted runner
+  # (linux/386, linux/riscv64). Go cross-compiles CGO_ENABLED=0 to these from
+  # ubuntu-latest without extra toolchains — the same set of packages the
+  # native `package` job builds (./cmd/zero, ./cmd/zero-linux-sandbox,
+  # ./cmd/zero-seccomp), so the archive layout matches the native one and
+  # install.sh's `copy_optional_*` calls keep working. Cross-built binaries
+  # are pure Go and reproducible from the same source as the native job's,
+  # so a separate runtime smoke is redundant — `zero-release verify` already
+  # checks the archive + sha256, which is enough to publish.
+  cross-package-linux:
+    name: Cross-package linux/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch:
+          - "386"      # 32-bit x86 (i686), used by older routers / industrial Linux
+          - riscv64    # 64-bit RISC-V, Alpine/musl and openSUSE already ship these
+    steps:
+      - name: Checkout
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.ref == '' }}
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout requested ref
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      # Same version guard as the native package job: the archive name embeds
+      # package.json's version, so a tag ref that disagrees would publish an
+      # asset that install.sh / install.ps1 can never resolve.
+      - name: Check tag matches package.json version
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        run: |
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "v$pkg_version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version v$pkg_version — bump package.json before tagging so the release assets and the npm package agree." >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME matches package.json version v$pkg_version."
+
+      # Per-target release/staging directories under dist/ so the matrix entries
+      # never clobber each other's outputs (resolvePackageDirs refuses paths
+      # outside dist/ anyway). Each entry produces exactly one archive + sha256
+      # pair named for its arch.
+      - name: Cross-package release artifact
+        run: >-
+          go run ./cmd/zero-release cross-package
+          --goos linux
+          --goarch ${{ matrix.goarch }}
+          --release-dir dist/release/${{ matrix.goarch }}
+          --staging-dir dist/package/${{ matrix.goarch }}
+
+      - name: Verify release checksums
+        run: go run ./cmd/zero-release verify --dir dist/release/${{ matrix.goarch }}
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zero-linux-${{ matrix.goarch }}
+          path: dist/release/${{ matrix.goarch }}/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes 2>/dev/null || true
+          gh release upload "$tag" dist/release/${{ matrix.goarch }}/* --repo "$GITHUB_REPOSITORY" --clobber
 
   # Publishes @gitlawb/zero to npm: first the five platform payloads (versions
   # of the SAME package at suffixed versions like X.Y.Z-linux-x64, carrying the

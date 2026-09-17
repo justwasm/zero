@@ -30,6 +30,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 		return runBuild(args[1:], stdout, stderr)
 	case "package":
 		return runPackage(args[1:], stdout, stderr)
+	case "cross-package":
+		return runCrossPackage(args[1:], stdout, stderr)
 	case "smoke":
 		return runSmoke(args[1:], stdout, stderr)
 	case "verify":
@@ -79,6 +81,28 @@ func runPackage(args []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	_, _ = fmt.Fprintf(stdout, "Packaged %s\n", result.ArchiveName)
+	_, _ = fmt.Fprintf(stdout, "Wrote %s.sha256\n", result.ArchiveName)
+	return 0
+}
+
+func runCrossPackage(args []string, stdout io.Writer, stderr io.Writer) int {
+	options, help, err := parseCrossPackageArgs(args)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	if help {
+		if err := writeCrossPackageHelp(stdout); err != nil {
+			return 1
+		}
+		return 0
+	}
+	result, err := release.CrossPackage(context.Background(), options)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "[zero] Cross packaging failed: "+err.Error())
+		return 1
+	}
+	_, _ = fmt.Fprintf(stdout, "Cross-packaged %s\n", result.ArchiveName)
 	_, _ = fmt.Fprintf(stdout, "Wrote %s.sha256\n", result.ArchiveName)
 	return 0
 }
@@ -223,8 +247,72 @@ func parsePackageArgs(args []string) (release.PackageOptions, bool, error) {
 			}
 			options.Version = value
 			index = next
+		case "--with-helpers":
+			options.WithHelpers = true
 		default:
 			return options, false, fmt.Errorf("unknown package flag %q", arg)
+		}
+	}
+	return options, false, nil
+}
+
+func parseCrossPackageArgs(args []string) (release.CrossPackageOptions, bool, error) {
+	options := release.CrossPackageOptions{}
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		flag, inlineValue := splitFlagValue(arg)
+		switch flag {
+		case "-h", "--help", "help":
+			if strings.Contains(arg, "=") {
+				return options, false, fmt.Errorf("%s does not accept a value", flag)
+			}
+			return options, true, nil
+		case "--root":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.RootDir = value
+			index = next
+		case "--release-dir":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.ReleaseDir = value
+			index = next
+		case "--staging-dir":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.StagingRoot = value
+			index = next
+		case "--goos":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.GOOS = value
+			index = next
+		case "--goarch":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.GOARCH = value
+			index = next
+		case "--version":
+			value, next, err := readOptionValue(args, inlineValue, index, flag)
+			if err != nil {
+				return options, false, err
+			}
+			options.Version = value
+			index = next
+		case "--with-helpers":
+			options.WithHelpers = true
+		default:
+			return options, false, fmt.Errorf("unknown cross-package flag %q", arg)
 		}
 	}
 	return options, false, nil
@@ -334,10 +422,11 @@ func writeHelp(w io.Writer) error {
   zero-release <command>
 
 Commands:
-  build      Build the Go-native zero binary
-  package    Build and package the current platform release archive
-  smoke      Verify the built zero binary prints the package version
-  verify     Verify release archive checksums
+  build           Build the Go-native zero binary
+  package         Build and package the current platform release archive
+  cross-package   Build and package a non-host release archive (linux/386, linux/riscv64, ...)
+  smoke           Verify the built zero binary prints the package version
+  verify          Verify release archive checksums
 `)
 	return err
 }
@@ -374,6 +463,33 @@ Flags:
       --release-dir <path>  Release output directory (default: dist/release)
       --staging-dir <path>  Package staging root (default: dist/package)
       --version <version>   Release version (default: package.json version)
+      --with-helpers        Stage the local-control helpers/ tree (npm ci).
+                            Off by default: most installs only need the
+                            binary, and helpers/ adds ~60-70 MB to every
+                            tarball. Enable for the npm platform packages.
+  -h, --help                Show this help
+`)
+	return err
+}
+
+func writeCrossPackageHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `Usage:
+  zero-release cross-package [flags]
+
+Builds and packages a release archive for a target platform that does not match
+the host. Skips the host-only --version smoke check and the npm helpers staging
+that Package runs, since neither is meaningful when host != target; install.sh
+treats helpers/ as optional, so the resulting archive installs as a working CLI.
+Workflow callers run the produced binary through qemu-user to smoke-verify it.
+
+Flags:
+      --root <path>         Repository root (default: current directory)
+      --release-dir <path>  Release output directory (default: dist/release)
+      --staging-dir <path>  Package staging root (default: dist/package)
+      --goos <goos>         Target GOOS (default: linux)
+      --goarch <goarch>     Target GOARCH (default: amd64)
+      --version <version>   Release version (default: package.json version)
+      --with-helpers        Accepted for symmetry with package; ignored.
   -h, --help                Show this help
 `)
 	return err
