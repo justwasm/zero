@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once the first release is
 tagged. Until then, source builds report the version `dev`.
 
+## [0.10.0](https://github.com/justwasm/zero/compare/v0.9.0...v0.10.0) (2026-09-17)
+
+
+### Features
+
+* **release:** ship lean tarballs without bundled helpers ([4fed52a](https://github.com/justwasm/zero/commit/4fed52a2a6511afd935874f60ef90a8f026bb50e))
+
+
+### Bug Fixes
+
+* **providers:** send stable session headers to OpenCode ([#1060](https://github.com/justwasm/zero/issues/1060)) ([99721c7](https://github.com/justwasm/zero/commit/99721c762f37cd43ac511007a5f51d1846df959e))
+
 ## [0.9.0](https://github.com/Gitlawb/zero/compare/v0.8.0...v0.9.0) (2026-09-15)
 
 
